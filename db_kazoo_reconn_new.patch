@@ -1,0 +1,779 @@
+diff -ru ../sip-router_orig/modules/db_kazoo/blf.c modules/db_kazoo/blf.c
+--- ../sip-router_orig/modules/db_kazoo/blf.c	2013-08-29 19:16:21.000000000 +0000
++++ modules/db_kazoo/blf.c	2013-09-05 11:19:56.000000000 +0000
+@@ -51,9 +51,9 @@
+ #define BLF_JSON_MSG_ID         "Msg-ID"
+ #define BLF_JSON_DIRECTION      "Direction"
+ 
+-// static char blf_queue_name_buffer[128];
++
++static char blf_queue_name_buffer[128];
+ static amqp_bytes_t blf_queue;
+-rmq_conn_t *dpk_pres_rmqconn;
+ 
+ str sht_name = str_init("$sht(dbkp=>$ci)");
+ pv_spec_t sht_spec;
+@@ -62,6 +62,7 @@
+ int dbk_initialize_presence(rmq_conn_t *rconn)
+ {
+ 	static amqp_bytes_t exch = {10, "dialoginfo"};
++	str unique_string;
+ 
+         LM_DBG("dbk_initialize_presence\n");
+ 	/* bind to presence module */
+@@ -120,20 +121,26 @@
+ 		return -1;
+ 	}
+ 
+-        {
+-          amqp_queue_declare_ok_t *r = amqp_queue_declare(rconn->conn, rconn->channel, amqp_empty_bytes, 0, 0, 0, 1, amqp_empty_table);
++	tmb.generate_callid(&unique_string);
++    
++	blf_queue.bytes = blf_queue_name_buffer;
++	blf_queue.len = sprintf(blf_queue.bytes, "BLF-%.*s-%.*s",
++		dbk_node_hostname.len, dbk_node_hostname.s, unique_string.len, unique_string.s);
++    
++		{
++          amqp_queue_declare_ok_t *r = amqp_queue_declare(rconn->conn, rconn->channel, blf_queue, 0, 0, 0, 1, amqp_empty_table);
+ 
+-          if (rmq_error("Declaring queue", amqp_get_rpc_reply(rconn->conn))) {
++          if (r < 0 || rmq_error("Declaring queue", amqp_get_rpc_reply(rconn->conn))) {
+                   LM_ERR("Failed to declare presence queue\n"); 
+ 	          return -1;
+           }
+-
++/*
+           blf_queue = amqp_bytes_malloc_dup(r->queue);
+           if (blf_queue.bytes == NULL) {
+                   LM_ERR("Unable to copy presence queue name\n"); 
+ 	          return -1;            
+           }
+-
++*/
+           LM_DBG("Create presence queue %.*s\n", (int) blf_queue.len, (char *) blf_queue.bytes);
+         }
+ 
+@@ -143,10 +150,6 @@
+ 		return -1;
+ 	}
+ 
+-        dpk_pres_rmqconn = rconn;
+-
+-        //	blf_queue.bytes = blf_queue_name_buffer;
+-        //	blf_queue.len = sprintf(blf_queue.bytes, "BLF-%.*s", dbk_node_hostname.len, dbk_node_hostname.s);
+ 
+ 	sprintf(node_name, "kamailio@%.*s", dbk_node_hostname.len, dbk_node_hostname.s);
+ 	return 0;
+@@ -158,11 +161,6 @@
+ 	int i;
+         LM_DBG("dbk_start_presence_rmqp_consumer_processes\n");
+ 
+-        if (!dpk_pres_rmqconn) {
+-                LM_ERR("Unable to start presence consumer, no AMQP connection\n");
+-		return;          
+-        }
+-
+ 	for (i= 0; i< DBK_PRES_WORKERS_NO; i++) {
+ 		int newpid = fork_process(PROC_NOCHLDINIT, "RMQP PRESENCE WORKER", 0);
+ 		if(newpid < 0) {
+@@ -178,6 +176,51 @@
+ 	}
+ }
+ 
++/*
++	if (!(rconn->conn = amqp_new_connection())) {
++						LM_ERR("cannot create new connection\n");
++						goto error;
++					}
++					LM_INFO("Created connection\n");
++
++					rconn->socket = amqp_tcp_socket_new();
++					if (!rconn->socket) {
++						LM_ERR("Failed to create TCP socket\n");
++						goto error;
++					}
++					if ( amqp_socket_open(rconn->socket, rconn->id->host, rconn->id->port) ) {
++						LM_ERR("Failed to open TCP socket\n");
++						goto error;
++					}
++
++					LM_INFO("Created new socket\n");
++
++					amqp_set_socket(rconn->conn, rconn->socket);
++					
++					LM_INFO("Set socket\n");
++
++					if ( rmq_error("Logging in", amqp_login(rconn->conn,
++							"/",
++							0,
++							131072,
++							0,
++							AMQP_SASL_METHOD_PLAIN,
++							rconn->id->username,
++							rconn->id->password)) ) {
++						LM_ERR("RMQP failed to login!\n");
++						goto error;
++					}
++					LM_INFO("Login\n");
++
++					rconn->channel = process_no + 1;
++					amqp_channel_open(rconn->conn, rconn->channel);
++					if (rmq_error("Opening channel", amqp_get_rpc_reply(rconn->conn))) {
++								LM_ERR("RMQP failed to open channel %d!\n", rconn->channel);
++						goto error;
++					}
++					LM_INFO("Open Channel\n");
++*/
++
+ void rmqp_consumer_loop(struct db_id* id)
+ {
+ 	amqp_frame_t frame;
+@@ -187,9 +230,17 @@
+ 	size_t body_target;
+ 	size_t body_received = 0;
+ 	char body[2048];
++	rmq_conn_t * rconn;
++	int reconn_retries = 0;
++
++	rconn = rmqp_new_connection(id);
++	if (rconn == NULL) {
++		LM_ERR("Failed to create rmqp connection\n");
++		return;
++	}
+ 
+-	amqp_basic_consume(dpk_pres_rmqconn->conn, dpk_pres_rmqconn->channel, blf_queue, amqp_empty_bytes, 0, 1, 0, amqp_empty_table);
+-	if (rmq_error("Consuming", amqp_get_rpc_reply(dpk_pres_rmqconn->conn))) {
++	amqp_basic_consume(rconn->conn, rconn->channel, blf_queue, amqp_empty_bytes, 0, 1, 0, amqp_empty_table);
++	if (rmq_error("Consuming", amqp_get_rpc_reply(rconn->conn))) {
+ 		goto error;
+ 	}
+ 
+@@ -197,11 +248,51 @@
+ 	while (1) {
+ 		LM_DBG("Wait for a packet\n");
+ 		while (1) {
+-			amqp_maybe_release_buffers(dpk_pres_rmqconn->conn);
++			amqp_maybe_release_buffers(rconn->conn);
+                         
+-			result = amqp_simple_wait_frame(dpk_pres_rmqconn->conn, &frame);
+-			if (result < 0) {
+-				break;
++			result = amqp_simple_wait_frame(rconn->conn, &frame);
++			if (result < 0 ) { 
++//				rmq_close(rconn);
++
++				/* reconnect  */
++				reconn_retries = 0;
++				while (reconn_retries < dbk_reconn_retries) {
++					reconn_retries++;
++					LM_INFO("Trial %d\n", reconn_retries);
++					sleep(1);
++					if ( rmqp_open_connection(rconn) != 0 ) {
++						LM_ERR("Failed to open connection\n"); 
++						continue;
++					}
++
++					amqp_queue_declare(rconn->conn, rconn->channel, blf_queue, 0, 0, 0, 1, amqp_empty_table);
++					if (rmq_error("Declaring queue", amqp_get_rpc_reply(rconn->conn))) {
++						LM_ERR("Failed to declare presence queue\n"); 
++						continue;
++					}
++
++					static amqp_bytes_t exch = {10, "dialoginfo"};
++					amqp_queue_bind(rconn->conn, rconn->channel, blf_queue, exch, blf_queue, amqp_empty_table);
++					if (rmq_error("Binding queue", amqp_get_rpc_reply(rconn->conn))) {
++								LM_ERR("Unable to bind presence queue\n"); 
++						continue;
++					}
++
++					amqp_basic_consume(rconn->conn, rconn->channel, blf_queue, amqp_empty_bytes, 0, 1, 0, amqp_empty_table);
++					if (rmq_error("Consuming", amqp_get_rpc_reply(rconn->conn))) {
++						continue;
++					}
++					/* if all succeesed, break */
++					break;
++				}
++
++				if (reconn_retries == dbk_reconn_retries) {
++					LM_ERR("Can not reconnect (maximum number of retries)\n");
++					goto error;
++				}
++				LM_INFO("Trial %d succeeded\n", reconn_retries);
++
++				continue;
+ 			}
+ 
+ 			LM_DBG("Frame type: %d channel: %d\n", frame.frame_type, frame.channel);
+@@ -220,7 +311,7 @@
+ 					(int) d->exchange.len, (char *) d->exchange.bytes,
+ 					(int) d->routing_key.len, (char *) d->routing_key.bytes);
+ 
+-			result = amqp_simple_wait_frame(dpk_pres_rmqconn->conn, &frame);
++			result = amqp_simple_wait_frame(rconn->conn, &frame);
+ 			if (result < 0) {
+ 				break;
+ 			}
+@@ -239,7 +330,7 @@
+ 			body_received = 0;
+ 
+ 			while (body_received < body_target) {
+-				result = amqp_simple_wait_frame(dpk_pres_rmqconn->conn, &frame);
++				result = amqp_simple_wait_frame(rconn->conn, &frame);
+ 				if (result < 0) {
+ 					break;
+ 				}
+@@ -284,6 +375,7 @@
+ 
+ error:
+ 	LM_ERR("Error in presence consumer loop\n");
++	rmq_close(rconn);
+ }
+ 
+ typedef struct dbk_pres_dialog {
+@@ -1284,17 +1370,38 @@
+ 	props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG;
+ 	props.content_type = amqp_cstring_bytes("application/json");
+ 
+-	amqp_basic_publish(rconn->conn,
+-			rconn->channel,
+-			rconn->exchange,
+-			routing_key,
+-			0,
+-			0,
+-			&props,
+-			amqp_mb);
++	int reconn_retries = 0;
++	while (reconn_retries < dbk_reconn_retries) {
++
++		if (amqp_basic_publish(rconn->conn,
++				rconn->channel,
++				rconn->exchange,
++				routing_key,
++				0,
++				0,
++				&props,
++				amqp_mb) < 0) {
++
++			LM_ERR("Failed to publish\n");
++			/* try to reconnect */
++			while (reconn_retries < dbk_reconn_retries) {
++				reconn_retries++;
++			
++				LM_INFO("Trial %d\n", reconn_retries);
++				if ( rmqp_open_connection(rconn) == 0 )
++					break;
++				sleep(1);
++			}
++			LM_INFO("Trial %d succeeded\n", reconn_retries);
++		
++		} else {
++			break;
++		}
++	
++	}
+ 
+-	if ( rmq_error("Publishing",  amqp_get_rpc_reply(rconn->conn)) ) {
+-		LM_ERR("Failed to publish\n");
++	if (reconn_retries == dbk_reconn_retries) {
++		LM_ERR("Can not reconnect (maximum number of retries)\n");
+ 		goto error;
+ 	}
+ 
+@@ -1409,8 +1516,8 @@
+ 
+ 	LM_INFO("Subscription %.*s/%.*s expires in %d\n"
+ 		,from_user->len, from_user->s
+-                ,user->len, user->s
+-                ,expires-(int)time(NULL));
++        ,user->len, user->s
++        ,expires-(int)time(NULL));
+ 
+ 	json_object_object_add(json_object, BLF_JSON_USER, json_object_new_string_len(user->s, user->len));
+ 	json_object_object_add(json_object, BLF_JSON_FROM, json_object_new_string_len(from_user->s, from_user->len));
+@@ -1446,17 +1553,39 @@
+ 	props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG;
+ 	props.content_type = amqp_cstring_bytes("application/json");
+ 
+-	amqp_basic_publish(rconn->conn,
++	int reconn_retries = 0;
++	while (reconn_retries < dbk_reconn_retries) {
++	
++		//if ( rmq_error("Publishing",  amqp_get_rpc_reply(rconn->conn)) ) {
++	
++		if (amqp_basic_publish(rconn->conn,
+ 			rconn->channel,
+ 			exchange,
+ 			routing_key,
+ 			0,
+ 			0,
+ 			&props,
+-			amqp_mb);
++			amqp_mb) < 0) {
++
++			LM_ERR("Failed to publish\n");
++			/* try to reconnect */
++			while (reconn_retries < dbk_reconn_retries) {
++				reconn_retries++;
++			
++				LM_INFO("Trial %d\n", reconn_retries);
++				if ( rmqp_open_connection(rconn) == 0 )
++					break;
++				sleep(1);
++			}
++			LM_INFO("Trial %d succeeded\n", reconn_retries);
++		} else {
++			break;
++		}
++
++	}
+ 
+-	if ( rmq_error("Publishing",  amqp_get_rpc_reply(rconn->conn)) ) {
+-		LM_ERR("Failed to publish\n");
++	if (reconn_retries == dbk_reconn_retries) {
++		LM_ERR("Can not reconnect (maximum number of retries)\n");
+ 		goto error;
+ 	}
+ 
+diff -ru ../sip-router_orig/modules/db_kazoo/blf.h modules/db_kazoo/blf.h
+--- ../sip-router_orig/modules/db_kazoo/blf.h	2013-08-29 19:16:21.000000000 +0000
++++ modules/db_kazoo/blf.h	2013-08-14 20:39:52.000000000 +0000
+@@ -20,6 +20,6 @@
+ 				const db_val_t* _v, const db_key_t* _uk, const db_val_t* _uv,
+ 				const int _n, const int _un);
+ 
+-#define DBK_PRES_WORKERS_NO 1
++#define DBK_PRES_WORKERS_NO 4
+ 
+ #endif
+diff -ru ../sip-router_orig/modules/db_kazoo/dbase.c modules/db_kazoo/dbase.c
+--- ../sip-router_orig/modules/db_kazoo/dbase.c	2013-08-29 19:16:21.000000000 +0000
++++ modules/db_kazoo/dbase.c	2013-09-05 11:20:03.000000000 +0000
+@@ -32,31 +32,16 @@
+ 		if (amqp_destroy_connection(rmq->conn) < 0)
+ 			LM_ERR("cannot destroy connection\n");
+ 		rmq->conn = NULL;
++		if (amqp_socket_close(rmq->socket) < 0) {
++			LM_ERR("Failed to close socket\n");
++		}
+ 	}
+ }
+ 
+ 
+-void* rmqp_new_connection(struct db_id* id)
+-{
+-	rmq_conn_t* rmq;
+-	int db_len = strlen(id->database);
+-	int size = sizeof(rmq_conn_t) + db_len;
+ 
+-	rmq = (rmq_conn_t*)pkg_malloc(size);
+-	if (!rmq) {
+-		LM_ERR("No more private memory\n");
+-		return NULL;
+-	}
+-	memset(rmq, 0, size);
+-	rmq->id = id;
+-	rmq->ref = 1;
+-	
+-	/* exchage = dbname ( ex: callmgr ) */
+-	rmq->exchange.bytes = (char*)rmq+ sizeof(rmq_conn_t);
+-	memcpy(rmq->exchange.bytes, id->database, db_len);
+-	rmq->exchange.len = db_len;
+-
+-	LM_DBG("Created new rmq structure %p for %s\n", rmq, id->database);
++int rmqp_open_connection(rmq_conn_t* rmq)
++{
+ 	if (!(rmq->conn = amqp_new_connection())) {
+ 		LM_ERR("cannot create new connection\n");
+ 		goto error;
+@@ -69,12 +54,12 @@
+ 	}
+ 
+ 	/* TODO - take as module parameters */
+-	if ( amqp_socket_open(rmq->socket, id->host, id->port) ) {
++	if ( amqp_socket_open(rmq->socket, rmq->id->host, rmq->id->port) ) {
+ 		LM_ERR("Failed to open TCP socket\n");
+ 		goto error;
+ 	}
+ 
+-       	amqp_set_socket(rmq->conn, rmq->socket);
++	amqp_set_socket(rmq->conn, rmq->socket);
+ 
+ 	if ( rmq_error("Logging in", amqp_login(rmq->conn,
+ 			"/",
+@@ -82,8 +67,8 @@
+ 			131072,
+ 			0,
+ 			AMQP_SASL_METHOD_PLAIN,
+-			id->username,
+-			id->password)) ) {
++			rmq->id->username,
++			rmq->id->password)) ) {
+                 LM_ERR("RMQP failed to login!\n");
+ 		goto error;
+ 	}
+@@ -95,6 +80,40 @@
+ 		goto error;
+ 	}
+ 
++	return 0;
++
++error:
++	return -1;
++}
++
++
++void* rmqp_new_connection(struct db_id* id)
++{
++	rmq_conn_t* rmq;
++	int db_len = strlen(id->database);
++	int size = sizeof(rmq_conn_t) + db_len;
++
++	rmq = (rmq_conn_t*)pkg_malloc(size);
++	if (!rmq) {
++		LM_ERR("No more private memory\n");
++		return NULL;
++	}
++	memset(rmq, 0, size);
++	rmq->id = id;
++	rmq->ref = 1;
++	
++	/* exchage = dbname ( ex: callmgr ) */
++	rmq->exchange.bytes = (char*)rmq+ sizeof(rmq_conn_t);
++	memcpy(rmq->exchange.bytes, id->database, db_len);
++	rmq->exchange.len = db_len;
++
++	LM_DBG("Created new rmq structure %p for %s\n", rmq, id->database);
++
++	if (rmqp_open_connection(rmq) < 0) {
++		LM_ERR("Failed to open new connection to amqp\n");
++		goto error;
++	}
++
+ 	return rmq;
+ 
+ error:
+@@ -103,6 +122,7 @@
+ 	return NULL;
+ }
+ 
++
+ rmq_conn_t* dbk_dummy_db_conn(struct db_id* id)
+ {
+ 	rmq_conn_t* rmq = (rmq_conn_t*)pkg_malloc(sizeof(rmq_conn_t));
+@@ -126,11 +146,11 @@
+ 			LM_DBG("Process no = %d\n", process_no);
+ 			if (process_no == 0 ) {
+ 				if (!presence_initialized) { /* called from mod_init before any fork */
+-                                        rmq_conn_t *rconn = rmqp_new_connection(id);
+-                                        if (rconn == NULL) {
+-                                               LM_ERR("Failed to create rmqp connection for presence\n");
+-                                               return NULL;
+-                                        }
++					rmq_conn_t *rconn = rmqp_new_connection(id);
++					if (rconn == NULL) {
++						   LM_ERR("Failed to create rmqp connection for presence\n");
++						   return NULL;
++					}
+ 
+ 					LM_DBG("Initialize presence\n");
+ 
+@@ -140,10 +160,10 @@
+ 					}
+ 					presence_initialized = 1;
+ 
+-                                        return rconn;
++                    return rconn;
+ 				}
+ 
+-                                return dbk_dummy_db_conn(id);
++				return dbk_dummy_db_conn(id);
+ 			} else if (process_no == 1) { /* called from child_init */
+ 				LM_DBG("Start presence rmqp consumer processes\n");
+ 				dbk_start_presence_rmqp_consumer_processes(id);
+@@ -351,6 +371,8 @@
+ }	
+ 
+ 
++#define RET_AMQP_ERROR 2
++
+ int dbk_credentials_query(const db1_con_t* _h, const db_key_t* _k,
+ 		const db_val_t* _v, const db_key_t* _c, int _n, int _nc, db1_res_t** _r)
+ {
+@@ -362,6 +384,7 @@
+ 	amqp_bytes_t amqp_mb;
+ 	amqp_bytes_t rpl_queue= {0, 0};
+ 	str unique_string = {0, 0};
++	int ret = -1;
+ 
+ 	LM_DBG("RMQ struct %p\n", rconn);
+ 
+@@ -416,17 +439,21 @@
+ 	amqp_queue_declare_ok_t *r = amqp_queue_declare(rconn->conn, rconn->channel, amqp_empty_bytes, 0, 0, 1, 1,
+ 								 amqp_empty_table);
+ 	if (rmq_error("Declaring queue", amqp_get_rpc_reply(rconn->conn))) {
++		ret = -RET_AMQP_ERROR;
+ 		goto error;
+ 	}
+-    	rpl_queue = amqp_bytes_malloc_dup(r->queue);
+-    	if (rpl_queue.bytes == NULL) {
++    
++	rpl_queue = amqp_bytes_malloc_dup(r->queue);
++    if (rpl_queue.bytes == NULL) {
+       		LM_ERR("Out of memory while copying queue name\n");
+       		goto error;
+ 	}
+ 
+ 	amqp_bytes_t rpl_exch = {8, "targeted"};
+-	amqp_queue_bind(rconn->conn, rconn->channel, rpl_queue, rpl_exch, rpl_routing_key, amqp_empty_table);
+-	if (rmq_error("Binding queue", amqp_get_rpc_reply(rconn->conn))) {
++	if ( amqp_queue_bind(rconn->conn, rconn->channel,
++			rpl_queue, rpl_exch, rpl_routing_key, amqp_empty_table) < 0 || 
++		rmq_error("Binding queue", amqp_get_rpc_reply(rconn->conn))) {
++		ret = -RET_AMQP_ERROR;
+ 		goto error;
+ 	}
+ 	LM_DBG("AMQP: after queue_bind  rpl_routing_key: [%.*s]\n", (int)rpl_routing_key.len, (char*)rpl_routing_key.bytes);
+@@ -439,24 +466,24 @@
+ 	props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG;
+ 	props.content_type = amqp_cstring_bytes("application/json");
+ 
+-	amqp_basic_publish(rconn->conn,
++	if ( amqp_basic_publish(rconn->conn,
+ 			rconn->channel,
+ 			rconn->exchange,
+ 			amqp_rk,
+ 			0,
+ 			0,
+ 			&props,
+-			amqp_mb);
+-
+-
+-	if ( rmq_error("Publishing",  amqp_get_rpc_reply(rconn->conn)) ) {
++			amqp_mb) < 0 || 
++		rmq_error("Publishing",  amqp_get_rpc_reply(rconn->conn)) ) {
++		ret = -RET_AMQP_ERROR;
+ 		goto error;
+ 	}
+ 
+ 	LM_DBG("Published with success\n");
+ 
+-	amqp_basic_consume(rconn->conn, rconn->channel, rpl_queue, amqp_empty_bytes, 0, 1, 1, amqp_empty_table);
+-	if (rmq_error("Consuming", amqp_get_rpc_reply(rconn->conn))) {
++	if ( amqp_basic_consume(rconn->conn, rconn->channel, rpl_queue, amqp_empty_bytes, 0, 1, 1, amqp_empty_table) < 0 ||
++		rmq_error("Consuming", amqp_get_rpc_reply(rconn->conn))) {
++		ret = -RET_AMQP_ERROR;
+ 		goto error;
+ 	}
+ 
+@@ -473,12 +500,14 @@
+ 		amqp_maybe_release_buffers(rconn->conn);
+ 		if (dbk_rmq_wait_for_data(rconn->conn) < 0 ) {
+ 			LM_ERR("RMQ data not ready - give up\n");
++			ret = -RET_AMQP_ERROR;
+ 			goto error;
+ 		}
+ 		result = amqp_simple_wait_frame(rconn->conn, &frame);
+ 		LM_DBG("Result: %d\n", result);
+ 		if (result < 0) {
+-			break;
++			ret = -RET_AMQP_ERROR;
++			goto error;
+ 		}
+ 
+ 		LM_DBG("Frame type: %d channel: %d\n", frame.frame_type, frame.channel);
+@@ -499,11 +528,13 @@
+ 
+ 		if (dbk_rmq_wait_for_data(rconn->conn) < 0 ) {
+ 			LM_ERR("RMQ data not ready - give up\n");
++			ret = -RET_AMQP_ERROR;
+ 			goto error;
+ 		}
+ 		result = amqp_simple_wait_frame(rconn->conn, &frame);
+ 		if (result < 0) {
+-			break;
++			ret = -RET_AMQP_ERROR;
++			goto error;
+ 		}
+ 
+ 		if (frame.frame_type != AMQP_FRAME_HEADER) {
+@@ -523,11 +554,13 @@
+ 		while (body_received < body_target) {
+ 			if (dbk_rmq_wait_for_data(rconn->conn) < 0 ) {
+ 				LM_ERR("RMQ data not ready - give up\n");
++				ret = -RET_AMQP_ERROR;
+ 				goto error;
+ 			}
+ 			result = amqp_simple_wait_frame(rconn->conn, &frame);
+ 			if (result < 0) {
+-				break;
++				ret = -RET_AMQP_ERROR;
++				goto error;
+ 			}
+ 
+ 			if (frame.frame_type != AMQP_FRAME_BODY) {
+@@ -591,9 +624,43 @@
+ error:
+ 	if(rpl_queue.bytes)
+ 		amqp_bytes_free(rpl_queue);
+-	return -1;
++	return ret;
+ }
+ 
++/* wrapper function to try reconnecting in case of error */
++int dbk_credentials_query_retry(const db1_con_t* _h, const db_key_t* _k,
++		const db_val_t* _v, const db_key_t* _c, int _n, int _nc, db1_res_t** _r) {
++
++	int reconn_retries = 0;
++	int ret;
++
++	while (reconn_retries < dbk_reconn_retries) {
++	
++		ret = dbk_credentials_query(_h, _k, _v, _c, _n, _nc, _r);
++
++		if ( ret != -RET_AMQP_ERROR) {
++			break;
++		}
++
++		LM_INFO("dbk_credentials_query returned RET_AMQP_ERROR\n");
++
++		/* reconnect */
++		while (reconn_retries < dbk_reconn_retries) {
++			reconn_retries++;
++			rmq_conn_t* rconn = (rmq_conn_t*)_h->tail;
++			
++			LM_INFO("Trial %d\n", reconn_retries);
++			if ( rmqp_open_connection(rconn) == 0 )
++				break;
++			sleep(1);
++		}
++		LM_INFO("Trial %d succeeded\n", reconn_retries);
++	}
++
++	return ret;
++}
++
++
+ db1_res_t* db_empty_result(void)
+ {
+ 	db1_res_t* db_res = db_new_result();
+@@ -627,7 +694,7 @@
+ 	LM_DBG("query table=%s\n", _h->table->s);
+ 	
+ 	if(strncmp(_h->table->s, "subscriber", 10)== 0 ) {
+-		return dbk_credentials_query(_h, _k, _v, _c, _n, _nc, _r);
++		return dbk_credentials_query_retry(_h, _k, _v, _c, _n, _nc, _r);
+ 	} else if(strncmp(_h->table->s, "presentity", 10)== 0 ) {
+ 		return dbk_presence_query(_h, _k, _v, _c, _n, _nc, _r);
+ 	} else {
+@@ -833,19 +900,33 @@
+ 	props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG;
+ 	props.content_type = amqp_cstring_bytes("application/json");
+ 
+-	amqp_basic_publish(rconn->conn,
+-			rconn->channel,
+-			rconn->exchange,
+-			amqp_rk,
+-			0,
+-			0,
+-			&props,
+-			amqp_mb);
+-
+-
+-	if ( rmq_error("Publishing",  amqp_get_rpc_reply(rconn->conn)) ) {
+-		LM_ERR("Failed to publish\n");
+-		goto error;
++	int reconn_retries = 0;
++	while (reconn_retries < dbk_reconn_retries) {
++	
++		if (amqp_basic_publish(rconn->conn,
++				rconn->channel,
++				rconn->exchange,
++				amqp_rk,
++				0,
++				0,
++				&props,
++				amqp_mb) < 0) {
++		
++			LM_ERR("Failed to publish\n");
++			/* try to reconnect */
++			while (reconn_retries < dbk_reconn_retries) {
++				reconn_retries++;
++			
++				LM_INFO("Trial %d\n", reconn_retries);
++				if ( rmqp_open_connection(rconn) == 0 )
++					break;
++				sleep(1);
++			}
++			LM_INFO("Trial %d succeeded\n", reconn_retries);
++		} else {
++			break;
++		}
++	
+ 	}
+ 
+ 	LM_DBG("Published with success\n");
+@@ -905,8 +986,6 @@
+ 	}
+ }
+ 
+-#define RCV_TIMEOUT 3         // seconds
+-
+ int dbk_rmq_wait_for_data(amqp_connection_state_t conn)
+ {
+         struct timeval timeout;
+@@ -922,7 +1001,7 @@
+         FD_ZERO(&read_flags);
+         FD_SET(sock, &read_flags);
+ 
+-        timeout.tv_sec = RCV_TIMEOUT;
++        timeout.tv_sec = dbk_auth_wait_timeout;
+         timeout.tv_usec = 0;
+ 
+         ret = select(sock+1, &read_flags, NULL, NULL, &timeout);
+diff -ru ../sip-router_orig/modules/db_kazoo/dbase.h modules/db_kazoo/dbase.h
+--- ../sip-router_orig/modules/db_kazoo/dbase.h	2013-08-29 19:16:21.000000000 +0000
++++ modules/db_kazoo/dbase.h	2013-09-05 11:20:38.000000000 +0000
+@@ -9,6 +9,8 @@
+ 
+ extern str dbk_node_hostname;
+ extern str dbk_reg_fs_path;
++extern int dbk_auth_wait_timeout;
++extern int dbk_reconn_retries;
+ extern struct tm_binds tmb;
+ 
+ typedef struct rmq_conn {
+@@ -90,4 +92,8 @@
+ 
+ int dbk_rmq_wait_for_data(amqp_connection_state_t conn);
+ 
++void rmq_close(rmq_conn_t* rmq);
++
++int rmqp_open_connection(rmq_conn_t* rmq);
++
+ #endif
+diff -ru ../sip-router_orig/modules/db_kazoo/db_kazoo.c modules/db_kazoo/db_kazoo.c
+--- ../sip-router_orig/modules/db_kazoo/db_kazoo.c	2013-08-29 19:16:21.000000000 +0000
++++ modules/db_kazoo/db_kazoo.c	2013-09-05 11:18:06.000000000 +0000
+@@ -44,6 +44,9 @@
+ 
+ str dbk_node_hostname={0, 0};
+ str dbk_reg_fs_path={0, 0};
++int dbk_auth_wait_timeout = 3;
++int dbk_reconn_retries = 8;
++
+ struct tm_binds tmb;
+ 
+ MODULE_VERSION
+@@ -58,8 +61,10 @@
+ 
+ 
+ static param_export_t params[] = {
+-	{"node_hostname",    STR_PARAM, &dbk_node_hostname.s},
+-	{"register_fs_path", STR_PARAM, &dbk_reg_fs_path.s  },
++	{"node_hostname",     STR_PARAM, &dbk_node_hostname.s},
++	{"register_fs_path",  STR_PARAM, &dbk_reg_fs_path.s  },
++	{"auth_wait_timeout", INT_PARAM, &dbk_auth_wait_timeout},
++	{"reconn_retries",    INT_PARAM, &dbk_reconn_retries},
+ 	{0, 0, 0}
+ };
+ static mi_export_t mi_cmds[] = {
